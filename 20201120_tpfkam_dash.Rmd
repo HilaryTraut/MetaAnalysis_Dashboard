@@ -1,0 +1,512 @@
+---
+title: "Supplemental. Traut et al., in sub."
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: columns
+    vertical_layout: fill
+    source_code: embed
+    theme: flatly
+runtime: shiny
+---
+
+```{r setup, include=FALSE}
+library(flexdashboard) #general pckgs
+library(tidyr)
+library(dplyr)
+library(shiny)
+library(meta)          #meta specific
+library(metafor)
+library(DT)            #visualization
+library(ggplot2)
+library(plotly)
+library(metaviz) 
+library(MASS)
+library(gridExtra)
+```
+
+```{r functions}
+## Function 1: Multilevel Model Variance Breakdown
+variance.distribution.3lm <- function(data, m){
+  
+  # Calculate estimated sampling variance and proportions across levels  
+  data <- data
+    m <- m
+    n <- length(data$v)
+    vector.inv.var <- 1/(data$v)
+    sum.inv.var <- sum(vector.inv.var)
+    sum.sq.inv.var <- (sum.inv.var)^2
+    vector.inv.var.sq <- 1/(data$v^2)
+    sum.inv.var.sq <- sum(vector.inv.var.sq)
+    num <- (n-1)*sum.inv.var
+    den <- sum.sq.inv.var - sum.inv.var.sq
+    est.samp.var <- num/den
+    level1<-((est.samp.var)/(m$sigma2[1]+m$sigma2[2]+est.samp.var)*100)
+    level2<-((m$sigma2[1])/(m$sigma2[1]+m$sigma2[2]+est.samp.var)*100)
+    level3<-((m$sigma2[2])/(m$sigma2[1]+m$sigma2[2]+est.samp.var)*100)
+    Level<-c("level 1", "level 2", "level 3")
+    Variance<-c(level1, level2, level3)
+    df<-data.frame(Level, Variance)
+    df1<-df
+    colnames(df1) <- c("Level", "% of total variance")
+    
+  #Generate plot
+  df$distribution<-"Distribution"
+  df$Level<-factor(df$Level, levels(df$Level)[c(3,2,1)])
+  g <- ggplot(df, aes(fill=Level, y=Variance, x=distribution)) + 
+    geom_bar(stat="identity", position="fill", width = 0.3) + coord_flip(ylim = c(1,0)) + scale_y_continuous(labels = scales::percent)+
+      theme(axis.title.x=element_blank(),
+        axis.title.y=element_blank(),
+        axis.ticks.y=element_blank(),
+        axis.text.y = element_blank(),
+        axis.line.x = element_line(colour = "black",
+                                   size = 0.5, linetype = "solid"),
+        legend.position = "bottom",
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        legend.background = element_rect(linetype="solid",
+                                         colour ="black"),
+        legend.title = element_blank(),
+        legend.key.size = unit(0.75,"cm")) + guides(fill = guide_legend(reverse = TRUE))
+  return(list(g, df1))
+}
+
+  funFunnel <- function(x) {
+      alpha <- .05
+      CRIT_95 <- 1.96
+      CRIT_99 <- 2.58
+    
+      d <- data.frame(se = sqrt(x$vi), es = x$yi, n = attr(x$yi, 'slab'))
+      center <- mean(d$es)
+      xlabel <- "\nEffect Size"
+      ylabel <- "Standard Error\n"
+
+    lower_lim <- max(d$se) + .05 * max(d$se)
+    funnel95 <- data.frame(x = c(center - lower_lim * CRIT_95, center,
+                                 center + lower_lim * CRIT_95),
+                           y = c(-lower_lim, 0, -lower_lim),
+                           stringsAsFactors = FALSE)
+
+    left_lim99 <- ifelse(center - lower_lim * CRIT_99 < min(d$es),
+                         center - lower_lim * CRIT_99,
+                         min(d$es))
+    right_lim99 <- ifelse(center + lower_lim * CRIT_99 > max(d$es),
+                          center + lower_lim * CRIT_99,
+                          max(d$es))
+    funnel99 <- data.frame(x = c(center - lower_lim * CRIT_99, center,
+                                 center + lower_lim * CRIT_99),
+                           y = c(-lower_lim, 0, -lower_lim),
+                           stringsAsFactors = FALSE)
+
+    p <- ggplot(d) +
+      geom_polygon(aes(x = x, y = y), data = funnel95, alpha = .5,
+                   fill = "white") +
+      geom_polygon(aes(x = x, y = y), data = funnel99, alpha = .5,
+                   fill = "white") +
+      geom_point(aes_string(x = "es", y = "-se", text = "n")) +
+      geom_vline(aes(), xintercept = center, linetype = "dotted", color = "black") +
+      xlab(xlabel) +
+      ylab(ylabel) +
+     # scale_colour_solarized(name = "", labels = labels, guide = guide) +
+      scale_x_continuous(limits = c(left_lim99, right_lim99)) +
+      scale_y_continuous(labels = function(x){abs(x)}) +
+      theme(panel.background = element_rect(fill = "grey"),
+            panel.grid.major =  element_line(colour = "darkgrey", size = 0.2),
+            panel.grid.minor =  element_line(colour = "darkgrey", size = 0.5))
+
+    # ggplotly hack - avoid weird lines by preventing overlapping geom_vlines
+    if (center != 0) {
+      p <- p + geom_vline(aes(), xintercept = 0, linetype = "dashed", color = "grey")
+    }
+
+    ggplotly(p, tooltip = c("n", "es")) %>%
+      layout(showlegend = FALSE)
+  }
+  
+#Interactive Forest Plot
+  forest <- function(inp, x) {
+    alpha <- .05
+    CRIT_95 <- 1.96
+    CRIT_99 <- 2.58
+    
+    f <- fitted(x)
+    p <- predict(x)
+    s <- summary(x)
+
+    forest_data <- data.frame(effects = as.numeric(x$yi.f), variances = x$vi.f, 
+                              stringsAsFactors = FALSE) %>%
+      
+      mutate(effects.cil = effects - qnorm(alpha / 2, lower.tail = FALSE) * sqrt(variances),
+             effects.cih = effects + qnorm(alpha / 2, lower.tail = FALSE) * sqrt(variances),
+             estimate = as.numeric(f),
+             short_cite = names(f),
+             estimate.cil = p$ci.lb,
+             estimate.cih = p$ci.ub,
+             inverse_vars = 1/variances,
+             identity = 1) %>%
+      mutate(short_cite = factor(short_cite, levels = short_cite))
+    
+      forest_data$short_cite <- paste0(forest_data$short_cite, 
+          "  [", round(forest_data$effects.cil,2), ", ", round(forest_data$effects.cih,2),"]")
+    
+    labels <- NULL
+    guide <- FALSE
+  
+    srt <- pull(forest_data, inp)
+    
+    plt <- ggplot(data = forest_data, aes(text = effects)) +
+      geom_point(aes(x = reorder(short_cite, srt), y = effects, size = inverse_vars)) +
+      geom_linerange(aes(x = reorder(short_cite, srt), y = effects, ymin = effects.cil, ymax = effects.cih)) +
+      geom_point(aes_string(x = "short_cite", y = "estimate"),
+                 shape = 17, colour = "cornflowerblue") +
+      geom_linerange(aes_string(x = "short_cite", y = "estimate", ymin = "estimate.cil",
+                                ymax = "estimate.cih"), colour = "cornflowerblue", alpha = 0.70) +
+      #geom_hline(yintercept = 0, linetype = "dashed", color = "red", size = 1) +
+      coord_flip() +
+      scale_size_continuous(range = c(1, 3), guide = FALSE) +
+      xlab("") +
+      ylab("Fisher's Z Transformed Correlation Coefficient") 
+
+    
+    ggplotly(plt, tooltip = c("text")) %>%
+                      layout(showlegend = FALSE)
+  }
+
+```
+
+```{r data}
+df <- read.csv('data/20201102_tpfkam_postcomps.csv', header = TRUE)      #readin data
+df <- df[df$approach != "both", ]                                        #exclude studies that did both approaches
+
+dat <- escalc(measure="ZCOR",                                            #Raw Correlations - fisher z-transformed
+              ri=df$r, 
+              ni=df$n, 
+              data=df)
+```
+
+```{r}
+#Model 1a
+res.ml <- rma.mv(yi, vi, 
+                 random = list(~1 |id, ~1 | paper), 
+                 slab=paste(paper), 
+                 data=dat)
+```
+
+```{r aggregated_data, warning=FALSE}
+foo <- df[match(unique(df$paper), df$paper),]                        #ensure match id for each individual paper
+bar <- cbind(foo,aggregate(df, by = list(df$paper), FUN = mean))     #calc mean across r and n for each individual paper
+df_ag <- bar[,c(1,2,10,11,5,6)]                                      #select relevant cols only
+
+dat_ag <- escalc(measure="ZCOR", #Aggregated Correlations
+              ri=df_ag$r, 
+              ni=df_ag$n, 
+              data=df_ag)
+```
+
+```{r aggmodel}
+resAgg <- rma(yi, vi, 
+              slab=paste(paper), 
+              data=dat_ag)
+```
+
+Intro
+===
+Column 
+-----------------------------------------------------------------------
+### Description
+
+This document presents interactive supplementary analysis reports for Traut et al., in submission at Frontiers in Psychology. Please contact H.J. Traut with any questions (hilary.traut@colorado.edu).
+
+
+Column {.tabset}
+-----------------------------------------------------------------------
+### Sample Effects
+
+```{r}
+samp <- MASS::mvrnorm(100, mu = c(0,0), Sigma = matrix(c(1,-0.7,-0.7,1), ncol = 2))
+samp <- as.data.frame(samp)
+
+p1 <- ggplot(samp, aes(x = V2, y = V1)) + geom_point() + geom_smooth(method = "lm") + 
+  labs(title = "Compensation", x = "Baseline Score", y = "Gains")
+```
+
+```{r}
+samp <- MASS::mvrnorm(100, mu = c(0,0), Sigma = matrix(c(1,0.7,0.7,1), ncol = 2))
+samp <- as.data.frame(samp)
+
+p2<- ggplot(samp, aes(x = V2, y = V1)) + geom_point() + geom_smooth(method = "lm") +
+  labs(title = "Magnification", x = "Baseline Score", y = "Gains")
+```
+
+```{r}
+samp <- MASS::mvrnorm(100, mu = c(0,0), Sigma = matrix(c(1,0,0,1), ncol = 2))
+samp <- as.data.frame(samp)
+
+p3<- ggplot(samp, aes(x = V2, y = V1)) + geom_point() + geom_smooth(method = "lm") +
+  labs(x = "Baseline Score", y = "Post-Test")
+```
+
+```{r}
+samp <- MASS::mvrnorm(100, mu = c(0,0), Sigma = matrix(c(1,0.8,0.8,1), ncol = 2))
+samp <- as.data.frame(samp)
+
+p4 <- ggplot(samp, aes(x = V2, y = V1)) + geom_point() + geom_smooth(method = "lm") +
+  labs(x = "Baseline Score", y = "Post-Test")
+```
+
+```{r}
+grid.arrange(p1,p2,p3,p4, ncol = 2)
+```
+
+### Models
+
+__Model 1:__ 3-Level Random Effects Model
+
+$$\hat{\theta}_{ij} = \theta_{ij} + \epsilon_{ij}$$
+
+$$\theta_{ij} = \kappa_i + \zeta_{(2)ij}$$
+
+$$\kappa_j = \beta_0 + \zeta_{(3)j}$$
+
+__Model 2:__ 3-Level Mixed Effects Model (proposed)
+
+$$\hat{\theta}_{ij} = \theta_{ij} + \epsilon_{ij}$$
+
+$$\theta_{ij} = \kappa_i + \zeta_{(2)ij}$$
+
+$$\kappa_j = \beta_0 + \beta_1(Domain) + \beta_2(Approach) + \zeta_{(3)j}$$
+
+__Model 2a:__ 3-Level Mixed Effects Model (conducted)
+
+$$\hat{\theta}_{ij} = \theta_{ij} + \epsilon_{ij}$$
+
+$$\theta_{ij} = \kappa_i + \zeta_{(2)ij}$$
+
+$$\kappa_j = \beta_0 + \beta_1(Domain/Approach) + \zeta_{(3)j}$$
+
+Data
+===
+Column
+---
+### Table
+
+Correlation coefficients are standardized by Fisher's Z as well as by a *-1 transformation such that a positive correlation indicates magnification and a negative correlation indicates compensation.
+
+
+```{r dataTable}
+datatable(df)
+```
+
+Column {.tabset}
+---
+### Cook's D
+
+```{r}
+#cooks d claculations
+f <- cooks.distance(res.ml)
+nam <- names(f)
+dis <- as.numeric(f)
+m <- data.frame(nam, dis)
+
+#plot
+ggplotly(ggplot(m, aes(x = nam, y = dis, group = 1)) + geom_point() + geom_line() + 
+  geom_hline(yintercept = (4/nrow(m)), color = "red") +
+  theme(axis.text.x = element_text(angle = 65, hjust = 1)) + ylab("Cook's Distance") + xlab(""))
+```
+
+### Baujat Plot
+
+__NOTE:__ Tested on non-multilevel model. Relationship of observations within paper not accounted for.
+
+```{r}
+res <- rma(yi, vi, slab=paste(paper), data=dat)
+baujat(res, symbol = "slab")
+```
+
+Bias
+===
+Column{.tabset}
+---
+### Funnel: All Effect Sizes
+
+```{r}
+funFunnel(res.ml)
+```
+
+### Funnel: Aggregated Effect Sizes
+
+```{r}
+funFunnel(resAgg)
+```
+
+### Sunset Funnel
+
+```{r}
+viz_sunset(res.ml)
+```
+
+Column
+---
+
+### Egger's Regression: Disaggregated
+
+```{r}
+regtest(res)
+```
+
+### Egger's Regression: Aggregated
+
+```{r}
+regtest(resAgg)
+```
+
+Model1
+===
+Column{.sidebar}
+---
+
+### Select Ordering
+
+```{r}
+selectInput("forest_sort", label = "Sort order",
+                              choices = c("weight (1/variance)" = "variances",
+                                          "effect size" = "effects",
+                                          #"model estimate" = "estimate",
+                                          "alphabetical" = "short_cite"))
+```
+
+Column
+------
+
+### Forest Plot
+
+```{r}
+renderPlotly({forest(input$forest_sort, res.ml)})
+```
+
+Column
+---
+### Meta-Correlation Coefficient
+
+```{r}
+res.ml
+```
+
+__I^2 Heterogenity__
+
+```{r}
+#Break down variance by Levels
+p<-variance.distribution.3lm(data = dat,
+                          m = res.ml)
+
+p[[2]]
+```
+
+Model2
+===
+Column{.sidebar}
+---
+
+### Select Ordering
+
+```{r}
+selectInput("forest_sort2", label = "Sort order",
+                              choices = c("weight (1/variance)" = "variances",
+                                          "effect size" = "effects",
+                                          "model estimate" = "estimate",
+                                          "alphabetical" = "short_cite"))
+```
+
+Column
+------
+
+### Forest Plot
+
+```{r}
+renderPlotly({forest(input$forest_sort2, res.me)})
+```
+
+Column
+---
+### Meta-Regression
+
+```{R}
+res.me <- rma.mv(yi, vi, 
+                 mods = ~factor(construct),
+                 random = list(~1 |id, ~1 | paper), slab=paste(paper), 
+                 data=dat); res.me
+```
+
+__I^2 Heterogenity__
+
+```{r}
+p<-variance.distribution.3lm(data = dat,
+                          m = res.me)
+
+p[[2]]
+```
+
+Model 3-EF only
+===
+Column{.sidebar}
+---
+### Select Ordering
+
+```{r}
+selectInput("forest_sort3", label = "Sort order",
+                              choices = c("weight (1/variance)" = "variances",
+                                          "effect size" = "effects",
+                                          "alphabetical" = "short_cite"))
+```
+
+Column
+------
+### Forest Plot
+
+```{r}
+renderPlotly({forest(input$forest_sort3, res.EF)})
+```
+
+Column{.tabset}
+---
+### Meta-Regression
+
+```{R}
+datEF <- dat %>%
+  filter(construct == "EF")
+
+res.EF <- rma.mv(yi, vi, 
+                 random = list(~1 |id, ~1 | paper), slab=paste(paper), 
+                 data=datEF); res.EF
+```
+
+__I^2 Heterogenity__
+
+```{r}
+p<-variance.distribution.3lm(data = datEF,
+                          m = res.EF)
+
+p[[2]]
+```
+
+__Egger's Regression__
+
+```{r}
+res <- rma(yi, vi, slab = paste(paper), data = datEF)
+regtest(res)
+```
+
+### Funnel
+
+```{r}
+funFunnel(res)
+```
+
+Refrences
+===
+Column 
+---
+### Resources
+
+* Analyses primarily conducted using the `metafor` package: https://www.metafor-project.org/doku.php/metafor
+* Reactive forest plot and interactive funnel plots based on code from the Standford MetaLab: http://metalab.stanford.edu/
